@@ -1,5 +1,7 @@
 # Production-Grade Agentic AI System
 
+[![gitcgr](https://gitcgr.com/badge/FareedKhan-dev/production-grade-agentic-system.svg)](https://gitcgr.com/FareedKhan-dev/production-grade-agentic-system)
+
 Modern **agentic AI systems**, whether running in **development, staging, or production**, are built as a **set of well-defined architectural layers** rather than a single service. Each layer is responsible for a specific concern such as **agent orchestration, memory management, security controls, scalability, and fault handling**. A production-grade agentic system typically combines these layers to ensure agents remain reliable, observable, and safe under real-world workloads.
 
 ![Production Grade Agentic System](https://miro.medium.com/v2/resize:fit:2560/1*GB6tXauVBaHVGDE4L_FkYg.png)
