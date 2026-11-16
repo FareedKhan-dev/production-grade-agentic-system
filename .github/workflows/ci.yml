@@ -1,0 +1,105 @@
+name: CI
+
+# lint: ruff. tests: the application against a real PostgreSQL (pgvector, as in
+# docker-compose.yml), with the LLM, web search and long-term memory replaced by fakes.
+# docker: builds the image, checks that the stack refuses to start without a JWT secret,
+# then starts it with one and walks through register, login and session creation.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install ruff==0.17.5
+      - run: ruff check .
+
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install uv==0.13.8
+      - run: uv sync --locked --group test
+      - run: uv run --locked pytest -v
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: An unedited .env.example does not start the API
+        run: |
+          cp .env.example .env.development
+          docker compose --env-file .env.development build app
+          status=0
+          output=$(timeout 300 docker compose --env-file .env.development run --rm --no-deps app 2>&1) || status=$?
+          echo "$output" | tail -n 8
+          # A timeout (124) would mean the API kept running
+          test "$status" -ne 0 && test "$status" -ne 124
+          echo "$output" | grep -q JWT_SECRET_KEY
+
+      - name: Neither does the default secret the old compose file used
+        run: |
+          status=0
+          output=$(timeout 300 docker compose --env-file .env.development run --rm --no-deps \
+            -e JWT_SECRET_KEY=supersecretkeythatshouldbechangedforproduction app 2>&1) || status=$?
+          echo "$output" | tail -n 8
+          test "$status" -ne 0 && test "$status" -ne 124
+          echo "$output" | grep -q "Refusing to start: JWT_SECRET_KEY is a published example value"
+
+      - name: Start the stack with a generated secret
+        run: |
+          secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(64))")
+          sed -i "s|^JWT_SECRET_KEY=.*|JWT_SECRET_KEY=$secret|" .env.development
+          docker compose --env-file .env.development up -d --wait --wait-timeout 180 db app
+
+      - name: Smoke test
+        run: |
+          base=http://localhost:8000
+          curl -fsS "$base/health"
+          # The env files must not be baked into the image
+          docker compose --env-file .env.development exec -T app sh -c 'test ! -e /app/.env.development'
+          email="ci-$RANDOM@example.com"
+          password='Str0ng&Pass<>'
+          curl -fsS -X POST "$base/api/v1/auth/register" -H 'Content-Type: application/json' \
+            -d "{\"email\": \"$email\", \"password\": \"$password\"}"
+          token=$(curl -fsS -X POST "$base/api/v1/auth/login" \
+            --data-urlencode "username=$email" --data-urlencode "password=$password" -d grant_type=password \
+            | python3 -c "import json, sys; print(json.load(sys.stdin)['access_token'])")
+          curl -fsS -X POST "$base/api/v1/auth/session" -H "Authorization: Bearer $token"
+
+      - name: Logs
+        if: failure()
+        run: docker compose --env-file .env.development logs app db
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose --env-file .env.development down -v
