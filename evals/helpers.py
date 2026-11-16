@@ -18,25 +18,40 @@ from src.system.logs import logger
 from evals.schemas import ScoreSchema
 
 
-def format_messages(messages: list[dict]) -> str:
+def _tool_call_arguments(messages: list[dict], tool_message: dict) -> Optional[str]:
+    """Find the arguments the model passed to the tool call a tool message answers."""
+    call_id = tool_message.get("tool_call_id")
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            if call.get("id") == call_id:
+                return json.dumps(call.get("args"))
+    return None
+
+
+def format_messages(messages: list[dict], context: Optional[list[dict]] = None) -> str:
     """Format a list of messages for evaluation.
 
     Args:
         messages: List of message dictionaries.
+        context: The whole conversation, to find tool call arguments in. Defaults to messages.
 
     Returns:
         String representation of formatted messages.
     """
+    context = messages if context is None else context
     formatted_messages = []
-    for idx, message in enumerate(messages):
-        if message["type"] == "tool":
-            formatted_messages.append(
-                f"tool {message.get('name')} input: {messages[idx - 1].get('additional_kwargs', {}).get('tool_calls', [])[0].get('function', {}).get('arguments')} {message.get('content')[:100]}..."
-                if len(message.get("content", "")) > 100
-                else f"tool {message.get('name')}: {message.get('content')}"
-            )
-        elif message["content"]:
-            formatted_messages.append(f"{message['type']}: {message['content']}")
+    for message in messages:
+        content = message.get("content") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        if message.get("type") == "tool":
+            if len(content) > 100:
+                arguments = _tool_call_arguments(context, message)
+                formatted_messages.append(f"tool {message.get('name')} input: {arguments} {content[:100]}...")
+            else:
+                formatted_messages.append(f"tool {message.get('name')}: {content}")
+        elif content:
+            formatted_messages.append(f"{message.get('type')}: {content}")
     return "\n".join(formatted_messages)
 
 
@@ -47,13 +62,14 @@ def get_input_output(trace: TraceWithDetails) -> Tuple[Optional[str], Optional[s
         trace: The trace to extract messages from.
 
     Returns:
-        Tuple of (formatted_input, formatted_output). None if output is not a dict.
+        Tuple of (formatted_input, formatted_output). None if the trace holds no messages.
     """
     if not isinstance(trace.output, dict):
         return None, None
-    input_messages = trace.output.get("messages", [])[:-1]
-    output_message = trace.output.get("messages", [])[-1]
-    return format_messages(input_messages), format_messages([output_message])
+    messages = trace.output.get("messages") or []
+    if not messages:
+        return None, None
+    return format_messages(messages[:-1], messages), format_messages(messages[-1:], messages)
 
 
 def initialize_report(model_name: str) -> Dict[str, Any]:
@@ -181,7 +197,7 @@ def generate_report(report: Dict[str, Any]) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(report_dir, f"evaluation_report_{timestamp}.json")
 
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
     # Add the report path to the report data for reference

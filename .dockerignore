@@ -1,0 +1,21 @@
+# Secrets: configuration reaches the container at runtime (env_file in docker-compose.yml)
+.env
+.env.*
+!.env.example
+
+# Version control, local environments and caches
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+
+# Runtime output
+logs
+evals/reports
+
+# Not needed to run the API
+tests

@@ -1,6 +1,7 @@
 """This file contains the main application entry point."""
 
-import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import (
@@ -21,39 +22,61 @@ from langfuse import Langfuse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from src.interface.api import api_router
-from src.config.settings import settings
-from src.system.rate_limit import limiter
+from src.config.settings import (
+    JWT_SECRET_HINT,
+    check_jwt_settings,
+    settings,
+)
 from src.system.logs import logger
-from src.system.telemetry import setup_metrics
-from src.system.middleware import (
+
+# Fail closed: with a missing, short or published JWT secret anyone could sign a token for
+# any user, so the API refuses to start instead of running with it. This runs before the
+# imports below, which connect to the database.
+jwt_problem = check_jwt_settings(settings.JWT_SECRET_KEY, settings.JWT_ALGORITHM)
+if jwt_problem:
+    logger.critical("refusing_to_start", reason=jwt_problem)
+    raise RuntimeError(f"Refusing to start: {jwt_problem}. {JWT_SECRET_HINT}")
+
+from src.data.db_manager import db_manager  # noqa: E402
+from src.interface.router import api_router  # noqa: E402
+from src.system.middleware import (  # noqa: E402
     LoggingContextMiddleware,
     MetricsMiddleware,
 )
-from src.data.db_manager import db_manager
+from src.system.rate_limit import limiter  # noqa: E402
+from src.system.telemetry import setup_metrics  # noqa: E402
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Langfuse
+# Initialize Langfuse (tracing is off when the keys are not set)
 langfuse = Langfuse(
-    public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-    secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-    host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+    public_key=settings.LANGFUSE_PUBLIC_KEY or None,
+    secret_key=settings.LANGFUSE_SECRET_KEY or None,
+    host=settings.LANGFUSE_HOST,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle application startup and shutdown events."""
+    # asyncio.to_thread runs on the loop's default executor, which holds CPU count + 4 threads.
+    # Here the blocking work is I/O (database queries, mem0's model and embedding calls), so
+    # give it enough threads not to queue behind a few slow model calls.
+    executor = ThreadPoolExecutor(max_workers=settings.THREAD_POOL_SIZE, thread_name_prefix="io")
+    asyncio.get_running_loop().set_default_executor(executor)
     logger.info(
         "application_startup",
         project_name=settings.PROJECT_NAME,
         version=settings.VERSION,
         api_prefix=settings.API_V1_STR,
+        thread_pool_size=settings.THREAD_POOL_SIZE,
     )
     yield
     logger.info("application_shutdown")
+    # Send the traces still buffered, or they are lost when the container stops
+    langfuse.flush()
+    executor.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -67,7 +90,10 @@ app = FastAPI(
 # Set up Prometheus metrics
 setup_metrics(app)
 
-# Add logging context middleware (must be added before other middleware to capture context)
+# Middleware. Starlette wraps each one added around those added before it, so the last one
+# added sees the request first: CORS, then the metrics, then the logging context, then the
+# route. The logging context sits closest to the route, which is all it needs: it binds the
+# IDs for the logs written while the route runs.
 app.add_middleware(LoggingContextMiddleware)
 
 # Add custom metrics middleware
@@ -90,8 +116,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     Returns:
         JSONResponse: A formatted error response
     """
-    # Log the validation error
-    logger.error(
+    # Log the validation error (a warning: it is usually the client's fault, not ours)
+    logger.warning(
         "validation_error",
         client_host=request.client.host if request.client else "unknown",
         path=request.url.path,
@@ -105,16 +131,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         formatted_errors.append({"field": loc, "message": error["msg"]})
 
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=422,
         content={"detail": "Validation error", "errors": formatted_errors},
     )
 
 
-# Set up CORS middleware
+# Set up CORS middleware. With "*" and credentials both allowed, Starlette answers any
+# website's cookie-carrying request with that website's origin, which is unsafe as soon as
+# anything uses cookies. The API authenticates with bearer tokens, so it does not need
+# credentialed requests unless the allowed origins are listed explicitly.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials="*" not in settings.ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

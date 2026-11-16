@@ -8,12 +8,15 @@ metrics = []
 # Define the directory where prompt files are stored
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
-# Iterate through all files in the prompts directory
-for file in os.listdir(PROMPTS_DIR):
+# Iterate through the prompt files in a fixed order, so reports list the metrics the same way everywhere
+for file in sorted(os.listdir(PROMPTS_DIR)):
     # Check if the file has a .md extension
     if file.endswith(".md"):
         # Read the content of the .md file and append it to the metrics list
-        metrics.append({
-            "name": file.replace(".md", ""),  # Use the file name (without extension) as the metric name
-            "prompt": open(os.path.join(PROMPTS_DIR, file), "r").read()  # Read the file content as the prompt
-        })
+        with open(os.path.join(PROMPTS_DIR, file), "r", encoding="utf-8") as f:
+            metrics.append(
+                {
+                    "name": file.removesuffix(".md"),  # Use the file name (without extension) as the metric name
+                    "prompt": f.read(),  # Read the file content as the prompt
+                }
+            )

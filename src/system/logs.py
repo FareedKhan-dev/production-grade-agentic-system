@@ -29,7 +29,8 @@ from src.config.settings import (
 settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Context variables for storing request-specific data
-_request_context: ContextVar[Dict[str, Any]] = ContextVar("request_context", default={})
+# The default is None rather than {}: a ContextVar default is one object shared by every context
+_request_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("request_context", default=None)
 
 
 def bind_context(**kwargs: Any) -> None:
@@ -38,7 +39,7 @@ def bind_context(**kwargs: Any) -> None:
     Args:
         **kwargs: Key-value pairs to bind to the logging context
     """
-    current = _request_context.get()
+    current = _request_context.get() or {}
     _request_context.set({**current, **kwargs})
 
 
@@ -53,7 +54,7 @@ def get_context() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Current context dictionary
     """
-    return _request_context.get()
+    return _request_context.get() or {}
 
 
 def add_context_to_event_dict(logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,15 +167,25 @@ def get_structlog_processors(include_file_info: bool = True) -> List[Any]:
     return processors
 
 
+def get_log_level() -> int:
+    """Return the level LOG_LEVEL names (DEBUG in development, WARNING in production by default).
+
+    An unknown name falls back to DEBUG when DEBUG is on, INFO otherwise.
+    """
+    level = logging.getLevelNamesMapping().get(settings.LOG_LEVEL.upper())
+    if level is None:
+        level = logging.DEBUG if settings.DEBUG else logging.INFO
+    return level
+
+
 def setup_logging() -> None:
     """Configure structlog with different formatters based on environment.
 
     In development: pretty console output
     In staging/production: structured JSON logs
     """
-    # Determine log level based on DEBUG setting
-    log_level = logging.DEBUG if settings.DEBUG else logging.INFO
-    
+    log_level = get_log_level()
+
     # Create file handler for JSON logs
     file_handler = JsonlFileHandler(get_log_file_path())
     file_handler.setLevel(log_level)
@@ -228,7 +239,7 @@ setup_logging()
 
 # Create logger instance
 logger = structlog.get_logger()
-log_level_name = "DEBUG" if settings.DEBUG else "INFO"
+log_level_name = logging.getLevelName(get_log_level())
 logger.info(
     "logging_initialized",
     environment=settings.ENVIRONMENT.value,

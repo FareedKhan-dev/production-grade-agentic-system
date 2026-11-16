@@ -4,6 +4,7 @@ import re
 from typing import (
     List,
     Literal,
+    Optional,
 )
 
 from pydantic import (
@@ -14,16 +15,20 @@ from pydantic import (
 
 
 class Message(BaseModel):
-    """Message model for chat endpoint.
+    """A message sent by the client.
+
+    The server keeps the conversation (LangGraph's checkpointer), so a request only carries
+    the new user turn. Accepting "system" or "assistant" here would let any client replace
+    the system prompt or put words in the assistant's mouth.
 
     Attributes:
-        role: The role of the message sender (user or assistant).
+        role: Always "user".
         content: The content of the message.
     """
 
     model_config = {"extra": "ignore"}
 
-    role: Literal["user", "assistant", "system"] = Field(..., description="The role of the message sender")
+    role: Literal["user"] = Field(..., description="The role of the message sender (only user messages are accepted)")
     content: str = Field(..., description="The content of the message", min_length=1, max_length=3000)
 
     @field_validator("content")
@@ -51,6 +56,21 @@ class Message(BaseModel):
         return v
 
 
+class ChatMessage(BaseModel):
+    """A message of the conversation as the API returns it.
+
+    No length limit: the 3000 characters apply to what clients send, and the assistant's
+    answers are often longer.
+
+    Attributes:
+        role: The role of the message sender (user or assistant).
+        content: The content of the message.
+    """
+
+    role: Literal["user", "assistant"] = Field(..., description="The role of the message sender")
+    content: str = Field(..., description="The content of the message")
+
+
 class ChatRequest(BaseModel):
     """Request model for chat endpoint.
 
@@ -72,7 +92,7 @@ class ChatResponse(BaseModel):
         messages: List of messages in the conversation.
     """
 
-    messages: List[Message] = Field(..., description="List of messages in the conversation")
+    messages: List[ChatMessage] = Field(..., description="List of messages in the conversation")
 
 
 class StreamResponse(BaseModel):
@@ -81,7 +101,9 @@ class StreamResponse(BaseModel):
     Attributes:
         content: The content of the current chunk.
         done: Whether the stream is complete.
+        error: Set on the last event when the answer could not be completed.
     """
 
     content: str = Field(default="", description="The content of the current chunk")
     done: bool = Field(default=False, description="Whether the stream is complete")
+    error: Optional[str] = Field(default=None, description="Why the stream ended early, if it did")

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Script to stop and remove Docker containers
+# Script to stop and remove the app and database containers (the data volumes are kept)
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <environment>"
@@ -17,21 +17,15 @@ if [[ ! "$ENV" =~ ^(development|staging|production)$ ]]; then
     exit 1
 fi
 
-CONTAINER_NAME="fastapi-langgraph-$ENV"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env.$ENV"
 
-echo "Stopping container for $ENV environment"
+cd "$PROJECT_ROOT"
 
-# Check if container exists
-if [ ! "$(docker ps -a -q -f name=$CONTAINER_NAME)" ]; then
-    echo "Container $CONTAINER_NAME does not exist. Nothing to do."
-    exit 0
+echo "Stopping containers for the $ENV environment"
+if [ -f "$ENV_FILE" ]; then
+    APP_ENV=$ENV docker compose --env-file "$ENV_FILE" down
+else
+    APP_ENV=$ENV docker compose down
 fi
-
-# Stop and remove container
-echo "Stopping container $CONTAINER_NAME..."
-docker stop $CONTAINER_NAME >/dev/null 2>&1 || echo "Container was not running"
-
-echo "Removing container $CONTAINER_NAME..."
-docker rm $CONTAINER_NAME >/dev/null 2>&1
-
-echo "Container $CONTAINER_NAME stopped and removed successfully"

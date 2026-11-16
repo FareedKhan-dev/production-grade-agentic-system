@@ -5,7 +5,6 @@ streaming chat, message history management, and chat history clearing.
 """
 
 import json
-from typing import List
 
 from fastapi import (
     APIRouter,
@@ -15,22 +14,25 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 
-from src.interface.auth import get_current_session
-from src.config.settings import settings
 from src.agent.workflow import LangGraphAgent
-from src.system.rate_limit import limiter
-from src.system.logs import logger
-from src.system.telemetry import llm_stream_duration_seconds
+from src.config.settings import settings
 from src.data.models.session import Session
 from src.data.schemas.chat import (
     ChatRequest,
     ChatResponse,
-    Message,
     StreamResponse,
 )
+from src.interface.auth import get_current_session
+from src.system.logs import logger
+from src.system.rate_limit import limiter
+from src.system.telemetry import llm_stream_duration_seconds
 
 router = APIRouter()
 agent = LangGraphAgent()
+
+# What clients see when something fails. The details (which can include provider error
+# messages, hostnames or partial keys) go to the logs only.
+CHAT_FAILED = "The assistant could not answer. Please try again later."
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -67,7 +69,7 @@ async def chat(
         return ChatResponse(messages=result)
     except Exception as e:
         logger.error("chat_request_failed", session_id=session.id, error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=CHAT_FAILED)
 
 
 @router.post("/chat/stream")
@@ -86,60 +88,47 @@ async def chat_stream(
 
     Returns:
         StreamingResponse: A streaming response of the chat completion.
-
-    Raises:
-        HTTPException: If there's an error processing the request.
     """
-    try:
-        logger.info(
-            "stream_chat_request_received",
-            session_id=session.id,
-            message_count=len(chat_request.messages),
-        )
+    logger.info(
+        "stream_chat_request_received",
+        session_id=session.id,
+        message_count=len(chat_request.messages),
+    )
 
-        async def event_generator():
-            """Generate streaming events.
+    async def event_generator():
+        """Generate streaming events.
 
-            Yields:
-                str: Server-sent events in JSON format.
+        Yields:
+            str: Server-sent events in JSON format.
+        """
+        try:
+            with llm_stream_duration_seconds.labels(model=agent.llm_service.model_name).time():
+                async for chunk in agent.get_stream_response(
+                    chat_request.messages, session.id, user_id=session.user_id
+                ):
+                    response = StreamResponse(content=chunk, done=False)
+                    yield f"data: {json.dumps(response.model_dump())}\n\n"
 
-            Raises:
-                Exception: If there's an error during streaming.
-            """
-            try:
-                full_response = ""
-                with llm_stream_duration_seconds.labels(model=agent.llm_service.get_llm().get_name()).time():
-                    async for chunk in agent.get_stream_response(
-                        chat_request.messages, session.id, user_id=session.user_id
-                    ):
-                        full_response += chunk
-                        response = StreamResponse(content=chunk, done=False)
-                        yield f"data: {json.dumps(response.model_dump())}\n\n"
+            # Send final message indicating completion
+            final_response = StreamResponse(content="", done=True)
+            yield f"data: {json.dumps(final_response.model_dump())}\n\n"
 
-                # Send final message indicating completion
-                final_response = StreamResponse(content="", done=True)
-                yield f"data: {json.dumps(final_response.model_dump())}\n\n"
+        except Exception as e:
+            logger.error(
+                "stream_chat_request_failed",
+                session_id=session.id,
+                error=str(e),
+                exc_info=True,
+            )
+            error_response = StreamResponse(content="", done=True, error=CHAT_FAILED)
+            yield f"data: {json.dumps(error_response.model_dump())}\n\n"
 
-            except Exception as e:
-                logger.error(
-                    "stream_chat_request_failed",
-                    session_id=session.id,
-                    error=str(e),
-                    exc_info=True,
-                )
-                error_response = StreamResponse(content=str(e), done=True)
-                yield f"data: {json.dumps(error_response.model_dump())}\n\n"
-
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-    except Exception as e:
-        logger.error(
-            "stream_chat_request_failed",
-            session_id=session.id,
-            error=str(e),
-            exc_info=True,
-        )
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        # Proxies such as nginx buffer responses by default, which would hold the tokens back
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/messages", response_model=ChatResponse)
@@ -165,7 +154,7 @@ async def get_session_messages(
         return ChatResponse(messages=messages)
     except Exception as e:
         logger.error("get_messages_failed", session_id=session.id, error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not load the messages. Please try again later.")
 
 
 @router.delete("/messages")
@@ -188,4 +177,4 @@ async def clear_chat_history(
         return {"message": "Chat history cleared successfully"}
     except Exception as e:
         logger.error("clear_chat_history_failed", session_id=session.id, error=str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not clear the messages. Please try again later.")

@@ -64,6 +64,8 @@ if [[ ${#missing_vars[@]} -gt 0 ]]; then
         echo "  - $var"
     done
     echo "Please provide these variables through environment or .env files."
+    echo "Generate JWT_SECRET_KEY with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    echo "(The API also refuses a short or published example key.)"
     exit 1
 fi
 

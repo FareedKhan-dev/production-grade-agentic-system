@@ -4,9 +4,14 @@ This module provides endpoints for user registration, login, session management,
 and token verification.
 """
 
+import asyncio
+import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import List
 
+import bcrypt
 from fastapi import (
     APIRouter,
     Depends,
@@ -18,41 +23,72 @@ from fastapi.security import (
     HTTPAuthorizationCredentials,
     HTTPBearer,
 )
+from sqlalchemy.exc import IntegrityError
 
 from src.config.settings import settings
-from src.system.rate_limit import limiter
-from src.system.logs import (
-    bind_context,
-    logger,
-)
+from src.data.db_manager import db_manager
 from src.data.models.session import Session
-from src.data.models.user import User
+from src.data.models.user import (
+    User,
+    password_matches,
+)
 from src.data.schemas.auth import (
     SessionResponse,
     TokenResponse,
     UserCreate,
     UserResponse,
 )
-from src.data.db_manager import DatabaseService
+from src.system.logs import (
+    bind_context,
+    logger,
+)
+from src.system.rate_limit import limiter
 from src.utils.auth import (
     create_access_token,
     verify_token,
 )
 from src.utils.sanitization import (
     sanitize_email,
-    sanitize_string,
     validate_password_strength,
 )
 
 router = APIRouter()
 security = HTTPBearer()
-db_service = DatabaseService()
+# One connection pool for the whole application
+db_service = db_manager
+
+
+def _unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail="Invalid authentication credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@lru_cache(maxsize=1)
+def _dummy_hash() -> str:
+    """A bcrypt hash to check unknown emails against, so they take as long as known ones."""
+    return bcrypt.hashpw(b"no such user", bcrypt.gensalt()).decode("utf-8")
+
+
+# bcrypt spends about a quarter of a second of CPU on every password, on purpose. In asyncio's
+# default thread pool it would share threads with the database queries, and a burst of logins
+# would occupy every core and starve the event loop: in a load test with 1,500 logins at once
+# that made waiting chats time out. bcrypt gets a pool of its own, one thread short of the core
+# count, so a core stays free for everything else.
+_bcrypt_pool = ThreadPoolExecutor(max_workers=max(1, (os.process_cpu_count() or 2) - 1), thread_name_prefix="bcrypt")
+
+
+async def _in_bcrypt_pool(function, *args):
+    """Run a bcrypt call (hash or check) in its own thread pool."""
+    return await asyncio.get_running_loop().run_in_executor(_bcrypt_pool, function, *args)
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> User:
-    """Get the current user ID from the token.
+    """Get the user a user token was issued to.
 
     Args:
         credentials: The HTTP authorization credentials containing the JWT token.
@@ -61,49 +97,27 @@ async def get_current_user(
         User: The user extracted from the token.
 
     Raises:
-        HTTPException: If the token is invalid or missing.
+        HTTPException: 401 if the token is invalid, expired, a session token, or its user no longer exists.
     """
-    try:
-        # Sanitize token
-        token = sanitize_string(credentials.credentials)
+    user_id = verify_token(credentials.credentials, "user")
+    if user_id is None or not user_id.isdigit():
+        raise _unauthorized()
 
-        user_id = verify_token(token)
-        if user_id is None:
-            logger.error("invalid_token", token_part=token[:10] + "...")
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    user = await db_service.get_user(int(user_id))
+    if user is None:
+        logger.warning("user_not_found", user_id=user_id)
+        raise _unauthorized()
 
-        # Verify user exists in database
-        user_id_int = int(user_id)
-        user = await db_service.get_user(user_id_int)
-        if user is None:
-            logger.error("user_not_found", user_id=user_id_int)
-            raise HTTPException(
-                status_code=404,
-                detail="User not found",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    # Bind user_id to logging context for all subsequent logs in this request
+    bind_context(user_id=user.id)
 
-        # Bind user_id to logging context for all subsequent logs in this request
-        bind_context(user_id=user_id_int)
-
-        return user
-    except ValueError as ve:
-        logger.error("token_validation_failed", error=str(ve), exc_info=True)
-        raise HTTPException(
-            status_code=422,
-            detail="Invalid token format",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    return user
 
 
 async def get_current_session(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> Session:
-    """Get the current session ID from the token.
+    """Get the chat session a session token was issued for.
 
     Args:
         credentials: The HTTP authorization credentials containing the JWT token.
@@ -112,45 +126,21 @@ async def get_current_session(
         Session: The session extracted from the token.
 
     Raises:
-        HTTPException: If the token is invalid or missing.
+        HTTPException: 401 if the token is invalid, expired, a user token, or its session was deleted.
     """
-    try:
-        # Sanitize token
-        token = sanitize_string(credentials.credentials)
+    session_id = verify_token(credentials.credentials, "session")
+    if session_id is None:
+        raise _unauthorized()
 
-        session_id = verify_token(token)
-        if session_id is None:
-            logger.error("session_id_not_found", token_part=token[:10] + "...")
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    session = await db_service.get_session(session_id)
+    if session is None:
+        logger.warning("session_not_found", session_id=session_id)
+        raise _unauthorized()
 
-        # Sanitize session_id before using it
-        session_id = sanitize_string(session_id)
+    # Bind user_id to logging context for all subsequent logs in this request
+    bind_context(user_id=session.user_id, session_id=session.id)
 
-        # Verify session exists in database
-        session = await db_service.get_session(session_id)
-        if session is None:
-            logger.error("session_not_found", session_id=session_id)
-            raise HTTPException(
-                status_code=404,
-                detail="Session not found",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
-        # Bind user_id to logging context for all subsequent logs in this request
-        bind_context(user_id=session.user_id)
-
-        return session
-    except ValueError as ve:
-        logger.error("token_validation_failed", error=str(ve), exc_info=True)
-        raise HTTPException(
-            status_code=422,
-            detail="Invalid token format",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    return session
 
 
 @router.post("/register", response_model=UserResponse)
@@ -172,21 +162,26 @@ async def register_user(request: Request, user_data: UserCreate):
         # Extract and validate password
         password = user_data.password.get_secret_value()
         validate_password_strength(password)
-
-        # Check if user exists
-        if await db_service.get_user_by_email(sanitized_email):
-            raise HTTPException(status_code=400, detail="Email already registered")
-
-        # Create user
-        user = await db_service.create_user(email=sanitized_email, password=User.hash_password(password))
-
-        # Create access token
-        token = create_access_token(str(user.id))
-
-        return UserResponse(id=user.id, email=user.email, token=token)
     except ValueError as ve:
-        logger.error("user_registration_validation_failed", error=str(ve), exc_info=True)
+        logger.warning("user_registration_validation_failed", error=str(ve))
         raise HTTPException(status_code=422, detail=str(ve))
+
+    # Check if user exists
+    if await db_service.get_user_by_email(sanitized_email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    # bcrypt is slow on purpose; hash in its own thread pool so other requests keep being served
+    hashed_password = await _in_bcrypt_pool(User.hash_password, password)
+    try:
+        user = await db_service.create_user(email=sanitized_email, password=hashed_password)
+    except IntegrityError:
+        # Another request registered the same email since the check above
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Create access token
+    token = create_access_token(str(user.id), "user")
+
+    return UserResponse(id=user.id, email=user.email, token=token)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -208,32 +203,34 @@ async def login(
     Raises:
         HTTPException: If credentials are invalid
     """
-    try:
-        # Sanitize inputs
-        username = sanitize_string(username)
-        password = sanitize_string(password)
-        grant_type = sanitize_string(grant_type)
+    # Verify grant type
+    if grant_type != "password":
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported grant type. Must be 'password'",
+        )
 
-        # Verify grant type
-        if grant_type != "password":
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported grant type. Must be 'password'",
-            )
+    # Emails are stored lowercased at registration. The password is compared exactly as typed:
+    # it is hashed, never displayed, so there is nothing to escape.
+    user = await db_service.get_user_by_email(username.strip().lower())
 
-        user = await db_service.get_user_by_email(username)
-        if not user or not user.verify_password(password):
-            raise HTTPException(
-                status_code=401,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    # Check against a dummy hash when the email is unknown, so the response time does not
+    # reveal which emails have accounts.
+    hashed_password = user.hashed_password if user else await _in_bcrypt_pool(_dummy_hash)
+    password_ok = await _in_bcrypt_pool(password_matches, password, hashed_password)
 
-        token = create_access_token(str(user.id))
-        return TokenResponse(access_token=token.access_token, token_type="bearer", expires_at=token.expires_at)
-    except ValueError as ve:
-        logger.error("login_validation_failed", error=str(ve), exc_info=True)
-        raise HTTPException(status_code=422, detail=str(ve))
+    if user is None or not password_ok:
+        # A burst of these is what a password-guessing attack looks like in the logs
+        logger.warning("login_failed")
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = create_access_token(str(user.id), "user")
+    logger.info("user_logged_in", user_id=user.id)
+    return TokenResponse(access_token=token.access_token, token_type="bearer", expires_at=token.expires_at)
 
 
 @router.post("/session", response_model=SessionResponse)
@@ -246,33 +243,31 @@ async def create_session(user: User = Depends(get_current_user)):
     Returns:
         SessionResponse: The session ID, name, and access token
     """
-    try:
-        # Generate a unique session ID
-        session_id = str(uuid.uuid4())
+    # Generate a unique session ID
+    session_id = str(uuid.uuid4())
 
-        # Create session in database
-        session = await db_service.create_session(session_id, user.id)
+    # Create session in database
+    session = await db_service.create_session(session_id, user.id)
 
-        # Create access token for the session
-        token = create_access_token(session_id)
+    # Create access token for the session
+    token = create_access_token(session_id, "session")
 
-        logger.info(
-            "session_created",
-            session_id=session_id,
-            user_id=user.id,
-            name=session.name,
-            expires_at=token.expires_at.isoformat(),
-        )
+    logger.info(
+        "session_created",
+        session_id=session_id,
+        user_id=user.id,
+        name=session.name,
+        expires_at=token.expires_at.isoformat(),
+    )
 
-        return SessionResponse(session_id=session_id, name=session.name, token=token)
-    except ValueError as ve:
-        logger.error("session_creation_validation_failed", error=str(ve), user_id=user.id, exc_info=True)
-        raise HTTPException(status_code=422, detail=str(ve))
+    return SessionResponse(session_id=session_id, name=session.name, token=token)
 
 
 @router.patch("/session/{session_id}/name", response_model=SessionResponse)
 async def update_session_name(
-    session_id: str, name: str = Form(...), current_session: Session = Depends(get_current_session)
+    session_id: str,
+    name: str = Form(..., max_length=100),
+    current_session: Session = Depends(get_current_session),
 ):
     """Update a session's name.
 
@@ -284,31 +279,22 @@ async def update_session_name(
     Returns:
         SessionResponse: The updated session information
     """
-    try:
-        # Sanitize inputs
-        sanitized_session_id = sanitize_string(session_id)
-        sanitized_name = sanitize_string(name)
-        sanitized_current_session = sanitize_string(current_session.id)
+    # Verify the session ID matches the authenticated session
+    if session_id != current_session.id:
+        raise HTTPException(status_code=403, detail="Cannot modify other sessions")
 
-        # Verify the session ID matches the authenticated session
-        if sanitized_session_id != sanitized_current_session:
-            raise HTTPException(status_code=403, detail="Cannot modify other sessions")
+    # Store the name as given; SessionResponse removes characters that are unsafe to display
+    session = await db_service.update_session_name(session_id, name)
 
-        # Update the session name
-        session = await db_service.update_session_name(sanitized_session_id, sanitized_name)
+    # Create a new token (not strictly necessary but maintains consistency)
+    token = create_access_token(session_id, "session")
 
-        # Create a new token (not strictly necessary but maintains consistency)
-        token = create_access_token(sanitized_session_id)
-
-        return SessionResponse(session_id=sanitized_session_id, name=session.name, token=token)
-    except ValueError as ve:
-        logger.error("session_update_validation_failed", error=str(ve), session_id=session_id, exc_info=True)
-        raise HTTPException(status_code=422, detail=str(ve))
+    return SessionResponse(session_id=session_id, name=session.name, token=token)
 
 
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str, current_session: Session = Depends(get_current_session)):
-    """Delete a session for the authenticated user.
+    """Delete a session and its conversation for the authenticated user.
 
     Args:
         session_id: The ID of the session to delete
@@ -317,22 +303,14 @@ async def delete_session(session_id: str, current_session: Session = Depends(get
     Returns:
         None
     """
-    try:
-        # Sanitize inputs
-        sanitized_session_id = sanitize_string(session_id)
-        sanitized_current_session = sanitize_string(current_session.id)
+    # Verify the session ID matches the authenticated session
+    if session_id != current_session.id:
+        raise HTTPException(status_code=403, detail="Cannot delete other sessions")
 
-        # Verify the session ID matches the authenticated session
-        if sanitized_session_id != sanitized_current_session:
-            raise HTTPException(status_code=403, detail="Cannot delete other sessions")
+    # Delete the session and its messages
+    await db_service.delete_session(session_id)
 
-        # Delete the session
-        await db_service.delete_session(sanitized_session_id)
-
-        logger.info("session_deleted", session_id=session_id, user_id=current_session.user_id)
-    except ValueError as ve:
-        logger.error("session_deletion_validation_failed", error=str(ve), session_id=session_id, exc_info=True)
-        raise HTTPException(status_code=422, detail=str(ve))
+    logger.info("session_deleted", session_id=session_id, user_id=current_session.user_id)
 
 
 @router.get("/sessions", response_model=List[SessionResponse])
@@ -345,16 +323,12 @@ async def get_user_sessions(user: User = Depends(get_current_user)):
     Returns:
         List[SessionResponse]: List of session IDs
     """
-    try:
-        sessions = await db_service.get_user_sessions(user.id)
-        return [
-            SessionResponse(
-                session_id=sanitize_string(session.id),
-                name=sanitize_string(session.name),
-                token=create_access_token(session.id),
-            )
-            for session in sessions
-        ]
-    except ValueError as ve:
-        logger.error("get_sessions_validation_failed", user_id=user.id, error=str(ve), exc_info=True)
-        raise HTTPException(status_code=422, detail=str(ve))
+    sessions = await db_service.get_user_sessions(user.id)
+    return [
+        SessionResponse(
+            session_id=session.id,
+            name=session.name,
+            token=create_access_token(session.id, "session"),
+        )
+        for session in sessions
+    ]

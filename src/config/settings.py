@@ -97,6 +97,51 @@ def parse_list_from_env(env_key, default=None):
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+# Values published as examples (in this repository, its README or the article). Anyone can
+# read them, so a token signed with one of them can be forged by anyone.
+KNOWN_PLACEHOLDER_SECRETS = frozenset(
+    {
+        "supersecretkeythatshouldbechangedforproduction",
+        "your-jwt-secret-key",
+        "unsafe-secret-for-dev",
+        "changeme",
+        "change-me",
+        "secret",
+    }
+)
+
+# RFC 7518, section 3.2: an HMAC key must be at least as long as the hash output.
+JWT_MIN_SECRET_BYTES = {"HS256": 32, "HS384": 48, "HS512": 64}
+
+JWT_SECRET_HINT = 'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(64))"'
+
+
+def check_jwt_settings(secret: str, algorithm: str) -> Optional[str]:
+    """Say why the JWT settings are unsafe, or return None when they are fine.
+
+    Every token is an HMAC of its claims, so whoever knows JWT_SECRET_KEY can sign a token
+    for any user. The key must be secret (not a value published as an example) and long
+    enough that it cannot be guessed.
+
+    Args:
+        secret: The value of JWT_SECRET_KEY.
+        algorithm: The value of JWT_ALGORITHM.
+
+    Returns:
+        Optional[str]: The problem, or None.
+    """
+    if algorithm not in JWT_MIN_SECRET_BYTES:
+        return f"JWT_ALGORITHM must be one of {', '.join(JWT_MIN_SECRET_BYTES)}, not {algorithm!r}"
+    if not secret:
+        return "JWT_SECRET_KEY is not set"
+    if secret.strip().lower() in KNOWN_PLACEHOLDER_SECRETS:
+        return "JWT_SECRET_KEY is a published example value, so anyone could sign tokens with it"
+    minimum = JWT_MIN_SECRET_BYTES[algorithm]
+    if len(secret.encode("utf-8")) < minimum:
+        return f"JWT_SECRET_KEY is shorter than {minimum} bytes, the minimum for {algorithm}"
+    return None
+
+
 # Parse dict of lists from environment variables with prefix
 def parse_dict_of_lists_from_env(prefix, default_dict=None):
     """Parse dictionary of lists from environment variables with a common prefix."""
@@ -136,7 +181,7 @@ class Settings:
         self.DESCRIPTION = os.getenv(
             "DESCRIPTION", "A production-ready FastAPI template with LangGraph and Langfuse integration"
         )
-        self.API_V1_STR = os.getenv("API_V1_STR", "/api")
+        self.API_V1_STR = os.getenv("API_V1_STR", "/api/v1")
         self.DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "t", "yes")
 
         # CORS Settings
@@ -149,19 +194,35 @@ class Settings:
 
         # LangGraph Configuration
         self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+        # Any OpenAI-compatible server (Azure OpenAI, vLLM, Ollama, OpenRouter...). Always passed
+        # explicitly: the OpenAI client would otherwise read the variable itself, and an empty one
+        # would leave it without a URL.
+        self.OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
         self.DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gpt-5-mini")
+        # Models to try, in order, when the current one keeps failing. Unset: the built-in OpenAI
+        # models. Set but empty: no fallback.
+        fallback_models = os.getenv("LLM_FALLBACK_MODELS")
+        self.LLM_FALLBACK_MODELS = (
+            None if fallback_models is None else [m.strip() for m in fallback_models.split(",") if m.strip()]
+        )
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
+        # Most tokens the model may write in one answer
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
+        # Most tokens of conversation history sent with each request (the oldest messages go first)
+        self.MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "16000"))
         self.MAX_LLM_CALL_RETRIES = int(os.getenv("MAX_LLM_CALL_RETRIES", "3"))
 
         # Long term memory Configuration
         self.LONG_TERM_MEMORY_MODEL = os.getenv("LONG_TERM_MEMORY_MODEL", "gpt-5-nano")
         self.LONG_TERM_MEMORY_EMBEDDER_MODEL = os.getenv("LONG_TERM_MEMORY_EMBEDDER_MODEL", "text-embedding-3-small")
+        # Must match the embedder: 1536 for text-embedding-3-small, 768 for nomic-embed-text...
+        self.LONG_TERM_MEMORY_EMBEDDER_DIMS = int(os.getenv("LONG_TERM_MEMORY_EMBEDDER_DIMS", "1536"))
         self.LONG_TERM_MEMORY_COLLECTION_NAME = os.getenv("LONG_TERM_MEMORY_COLLECTION_NAME", "longterm_memory")
-        # JWT Configuration
+        # JWT Configuration. There is deliberately no default key: the API refuses to start
+        # until JWT_SECRET_KEY is set to a long random value (see check_jwt_settings).
         self.JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
         self.JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-        self.JWT_ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_DAYS", "30"))
+        self.JWT_ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_DAYS", "7"))
 
         # Logging Configuration
         self.LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
@@ -175,6 +236,9 @@ class Settings:
         self.POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
         self.POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
         self.POSTGRES_POOL_SIZE = int(os.getenv("POSTGRES_POOL_SIZE", "20"))
+        # Threads for blocking work run from async code: database queries and mem0's model and
+        # embedding calls. asyncio's default (CPU count + 4) is sized for CPU-bound work.
+        self.THREAD_POOL_SIZE = int(os.getenv("THREAD_POOL_SIZE", "64"))
         self.POSTGRES_MAX_OVERFLOW = int(os.getenv("POSTGRES_MAX_OVERFLOW", "10"))
         self.CHECKPOINT_TABLES = ["checkpoint_blobs", "checkpoint_writes", "checkpoints"]
 

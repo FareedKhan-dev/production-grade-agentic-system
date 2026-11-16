@@ -1,0 +1,24 @@
+# Load-test override: adds scripts/fake_llm.py, an OpenAI-compatible server that answers
+# after FAKE_LLM_DELAY seconds, so a load test measures this system rather than a model
+# provider (and costs nothing). Point the API at it in the env file:
+#
+#   OPENAI_BASE_URL=http://fake-llm:9000/v1
+#   DEFAULT_LLM_MODEL=fake-model
+#   LLM_FALLBACK_MODELS=
+#   LONG_TERM_MEMORY_MODEL=fake-model
+#
+# then start the stack with both files:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.load.yml --env-file .env.production \
+#     up -d --build db app prometheus fake-llm
+#
+# See "Architecture Stress Testing" in the README.
+services:
+  fake-llm:
+    build: .
+    entrypoint: []
+    command: ["/app/.venv/bin/uvicorn", "scripts.fake_llm:app", "--host", "0.0.0.0", "--port", "9000"]
+    environment:
+      - FAKE_LLM_DELAY=1.0
+    networks:
+      - monitoring

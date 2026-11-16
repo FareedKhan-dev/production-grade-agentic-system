@@ -1,67 +1,270 @@
 {
-  "dashboard": {
-    "id": null,
-    "uid": "llm-latency",
-    "title": "LLM Inference Latency",
-    "tags": ["inference", "latency"],
-    "timezone": "browser",
-    "schemaVersion": 30,
-    "version": 3,
-    "refresh": "10s",
-    "panels": [
-      {
-        "type": "graph",
-        "title": "LLM Inference Duration (p95)",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(llm_inference_duration_seconds_bucket[1m]))",
-            "legendFormat": "{{model}} (chat)",
-            "refId": "A"
-          }
-        ],
-        "datasource": "Prometheus",
-        "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 }
-      },
-      {
-        "type": "graph",
-        "title": "LLM Stream Inference Duration (p95)",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(llm_stream_duration_seconds_bucket[1m]))",
-            "legendFormat": "{{model}} (stream)",
-            "refId": "B"
-          }
-        ],
-        "datasource": "Prometheus",
-        "gridPos": { "x": 0, "y": 9, "w": 24, "h": 9 }
-      },
-      {
-        "type": "graph",
-        "title": "LLM Inference Duration (Average)",
-        "targets": [
-          {
-            "expr": "rate(llm_inference_duration_seconds_sum[1m]) / rate(llm_inference_duration_seconds_count[1m])",
-            "legendFormat": "{{model}} (avg)",
-            "refId": "C"
-          }
-        ],
-        "datasource": "Prometheus",
-        "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 }
-      },
-      {
-        "type": "graph",
-        "title": "LLM Inference Request Count",
-        "targets": [
-          {
-            "expr": "rate(llm_inference_duration_seconds_count[1m])",
-            "legendFormat": "{{model}}",
-            "refId": "D"
-          }
-        ],
-        "datasource": "Prometheus",
-        "gridPos": { "x": 0, "y": 27, "w": 24, "h": 9 }
-      }
-    ]
+  "uid": "llm-latency",
+  "title": "LLM Inference Latency",
+  "tags": [
+    "inference",
+    "latency"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
   },
-  "overwrite": true
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "LLM Inference Duration (p95)",
+      "description": "95th percentile of one LLM call, per model.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(llm_inference_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{model}} (chat)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "LLM Stream Inference Duration (p95)",
+      "description": "95th percentile of a whole streamed answer, per model.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(llm_stream_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{model}} (stream)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "LLM Inference Duration (Average)",
+      "description": "Average duration of one LLM call, per model.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model) (rate(llm_inference_duration_seconds_sum[1m])) / sum by (model) (rate(llm_inference_duration_seconds_count[1m]))",
+          "legendFormat": "{{model}} (avg)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "LLM Inference Request Count",
+      "description": "LLM calls per second, per model.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model) (rate(llm_inference_duration_seconds_count[1m]))",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP Requests per Second, by Route",
+      "description": "Requests per route template and status code.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (endpoint, status) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{endpoint}} {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Database Connections in Use",
+      "description": "Connections checked out of the API's SQLAlchemy pool.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "db_connections",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
 }

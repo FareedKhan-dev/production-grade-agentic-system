@@ -6,6 +6,7 @@ endpoints like authentication and chatbot functionality.
 
 from fastapi import APIRouter
 
+from src.config.settings import settings
 from src.interface.auth import router as auth_router
 from src.interface.interaction import router as chatbot_router
 from src.system.logs import logger
@@ -25,4 +26,4 @@ async def health_check():
         dict: Health status information.
     """
     logger.info("health_check_called")
-    return {"status": "healthy", "version": "1.0.0"}
+    return {"status": "healthy", "version": settings.VERSION}

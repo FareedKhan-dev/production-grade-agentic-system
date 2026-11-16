@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -8,7 +6,8 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     ports:
-      - "5432:5432"
+      # Reachable from this machine only; the app reaches it as db:5432 on the compose network
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -29,31 +28,40 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./app:/app/src
-      - ./logs:/app/logs
+      - app-logs:/app/logs
+    # Every open connection is a file descriptor, and Docker's default soft limit inside a
+    # container is 1024: past about a thousand concurrent clients, requests start failing
+    # with "Too many open files".
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Every setting, including JWT_SECRET_KEY, comes from this file. There is deliberately no
+    # fallback secret: the API refuses to start without a strong one.
     env_file:
       - .env.${APP_ENV:-development}
     environment:
       - APP_ENV=${APP_ENV:-development}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-supersecretkeythatshouldbechangedforproduction}
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # The slim Python image has no curl
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 20s
     restart: on-failure
     networks:
       - monitoring
 
-  # Prometheus
+  # Prometheus. The monitoring images are pinned to the versions this release was tested with;
+  # "latest" would change under you on the next pull.
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.16.0
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     command:
@@ -64,24 +72,26 @@ services:
 
   # Grafana
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.3.1
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana/dashboards/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Set GRAFANA_ADMIN_PASSWORD in the env file. Grafana is reachable from this machine only.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
     networks:
       - monitoring
     restart: always
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:rw
@@ -97,5 +107,6 @@ networks:
     driver: bridge
 
 volumes:
+  app-logs:
   grafana-storage:
   postgres-data:

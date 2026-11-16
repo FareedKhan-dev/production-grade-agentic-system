@@ -8,7 +8,6 @@ from datetime import (
     datetime,
     timedelta,
 )
-from time import sleep
 
 import openai
 from langfuse import Langfuse
@@ -47,7 +46,11 @@ class Evaluator:
     def __init__(self):
         """Initialize Evaluator with OpenAI and Langfuse clients."""
         self.client = openai.AsyncOpenAI(api_key=settings.EVALUATION_API_KEY, base_url=settings.EVALUATION_BASE_URL)
-        self.langfuse = Langfuse(public_key=settings.LANGFUSE_PUBLIC_KEY, secret_key=settings.LANGFUSE_SECRET_KEY)
+        self.langfuse = Langfuse(
+            public_key=settings.LANGFUSE_PUBLIC_KEY,
+            secret_key=settings.LANGFUSE_SECRET_KEY,
+            host=settings.LANGFUSE_HOST,
+        )
         # Initialize report data structure
         self.report = initialize_report(settings.EVALUATION_LLM)
         initialize_metrics_summary(self.report, metrics)
@@ -93,7 +96,7 @@ class Evaluator:
 
             # Process results for the current trace
             process_trace_results(self.report, trace_id, trace_results, len(metrics))
-            sleep(settings.EVALUATION_SLEEP_TIME)  # Sleep to avoid rate limits
+            await asyncio.sleep(settings.EVALUATION_SLEEP_TIME)  # Sleep to avoid rate limits
 
         # Calculate evaluation duration and average scores
         self.report["duration_seconds"] = round(time.time() - start_time, 2)
@@ -173,7 +176,7 @@ class Evaluator:
         for _ in range(num_retries):
             try:
                 # Call OpenAI API with the provided prompt, input, and output
-                response = await self.client.beta.chat.completions.parse(
+                response = await self.client.chat.completions.parse(
                     model=settings.EVALUATION_LLM,
                     messages=[
                         {"role": "system", "content": metric_system_prompt},
@@ -185,7 +188,7 @@ class Evaluator:
             except Exception as e:
                 SLEEP_TIME = 10
                 logger.error("Error calling OpenAI", error=str(e), sleep_time=SLEEP_TIME)
-                sleep(SLEEP_TIME)  # Sleep before retrying
+                await asyncio.sleep(SLEEP_TIME)  # Sleep before retrying
                 continue
         return None
 

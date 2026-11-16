@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers: keep them LF even on Windows checkouts,
+# or bash fails on the carriage returns.
+*.sh text eol=lf
+Makefile text eol=lf

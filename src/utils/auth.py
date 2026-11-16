@@ -1,85 +1,105 @@
 """This file contains the authentication utilities for the application."""
 
-import re
+import uuid
 from datetime import (
     UTC,
     datetime,
     timedelta,
 )
-from typing import Optional
-
-from jose import (
-    JWTError,
-    jwt,
+from typing import (
+    Any,
+    Dict,
+    Literal,
+    Optional,
 )
 
-from src.config.settings import settings
-from src.system.logs import logger
+import jwt
+
+from src.config.settings import (
+    check_jwt_settings,
+    settings,
+)
 from src.data.schemas.auth import Token
-from src.utils.sanitization import sanitize_string
+from src.system.logs import logger
+
+# A user token says who the user is (it comes from /register or /login). A session token
+# gives access to one chat session (it comes from /session). Each endpoint accepts one type.
+TokenType = Literal["user", "session"]
 
 
-def create_access_token(thread_id: str, expires_delta: Optional[timedelta] = None) -> Token:
-    """Create a new access token for a thread.
+def _signing_key() -> str:
+    """Return JWT_SECRET_KEY, refusing to sign or verify anything with an unsafe key."""
+    problem = check_jwt_settings(settings.JWT_SECRET_KEY, settings.JWT_ALGORITHM)
+    if problem:
+        raise RuntimeError(problem)
+    return settings.JWT_SECRET_KEY
+
+
+def create_access_token(subject: str, token_type: TokenType, expires_delta: Optional[timedelta] = None) -> Token:
+    """Create a signed access token.
 
     Args:
-        thread_id: The unique thread ID for the conversation.
-        expires_delta: Optional expiration time delta.
+        subject: The user ID for a user token, the session ID for a session token.
+        token_type: "user" or "session".
+        expires_delta: Optional lifetime. Defaults to JWT_ACCESS_TOKEN_EXPIRE_DAYS.
 
     Returns:
         Token: The generated access token.
     """
-    if expires_delta:
-        expire = datetime.now(UTC) + expires_delta
-    else:
-        expire = datetime.now(UTC) + timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS)
+    now = datetime.now(UTC)
+    expire = now + (expires_delta or timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS))
 
     to_encode = {
-        "sub": thread_id,
+        "sub": subject,
+        "type": token_type,
+        "iat": now,
         "exp": expire,
-        "iat": datetime.now(UTC),
-        "jti": sanitize_string(f"{thread_id}-{datetime.now(UTC).timestamp()}"),  # Add unique token identifier
+        "jti": uuid.uuid4().hex,  # Unique token identifier
     }
 
-    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, _signing_key(), algorithm=settings.JWT_ALGORITHM)
 
-    logger.info("token_created", thread_id=thread_id, expires_at=expire.isoformat())
+    logger.info("token_created", token_type=token_type, subject=subject, expires_at=expire.isoformat())
 
     return Token(access_token=encoded_jwt, expires_at=expire)
 
 
-def verify_token(token: str) -> Optional[str]:
-    """Verify a JWT token and return the thread ID.
+def decode_token(token: str) -> Optional[Dict[str, Any]]:
+    """Return the claims of a token whose signature and expiry check out.
 
     Args:
-        token: The JWT token to verify.
+        token: The JWT.
 
     Returns:
-        Optional[str]: The thread ID if token is valid, None otherwise.
-
-    Raises:
-        ValueError: If the token format is invalid
+        Optional[Dict[str, Any]]: The claims, or None if the token is malformed, forged or expired.
     """
-    if not token or not isinstance(token, str):
-        logger.warning("token_invalid_format")
-        raise ValueError("Token must be a non-empty string")
-
-    # Basic format validation before attempting decode
-    # JWT tokens consist of 3 base64url-encoded segments separated by dots
-    if not re.match(r"^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$", token):
-        logger.warning("token_suspicious_format")
-        raise ValueError("Token format is invalid - expected JWT format")
-
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        thread_id: str = payload.get("sub")
-        if thread_id is None:
-            logger.warning("token_missing_thread_id")
-            return None
-
-        logger.info("token_verified", thread_id=thread_id)
-        return thread_id
-
-    except JWTError as e:
-        logger.error("token_verification_failed", error=str(e))
+        return jwt.decode(
+            token,
+            _signing_key(),
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"require": ["sub", "type", "iat", "exp"]},
+        )
+    except jwt.InvalidTokenError:
         return None
+
+
+def verify_token(token: str, token_type: TokenType) -> Optional[str]:
+    """Verify a token and return its subject.
+
+    Args:
+        token: The JWT from the Authorization header.
+        token_type: The type of token the endpoint accepts.
+
+    Returns:
+        Optional[str]: The user or session ID, or None if the token is invalid, expired,
+        or of the other type.
+    """
+    claims = decode_token(token)
+    if claims is None:
+        logger.warning("token_rejected", reason="invalid or expired")
+        return None
+    if claims.get("type") != token_type:
+        logger.warning("token_rejected", reason="wrong token type", expected=token_type, got=claims.get("type"))
+        return None
+    return claims["sub"]

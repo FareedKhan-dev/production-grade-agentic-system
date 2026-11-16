@@ -1,0 +1,25 @@
+# Environment files hold API keys and the JWT secret. Only the example is committed.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Tools
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime output
+logs/
+evals/reports/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store

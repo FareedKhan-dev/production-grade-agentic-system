@@ -1,29 +1,25 @@
--- Database schema for the application
--- Generated from SQLModel classes
+-- Database schema for the application, as PostgreSQL DDL.
+-- The SQLModel classes in src/data/models create these tables at startup, and
+-- tests/test_schema.py checks that this file matches them. LangGraph's checkpointer
+-- and mem0 create their own tables the first time the agent runs.
 
--- Create user table
-CREATE TABLE IF NOT EXISTS user (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
-    hashed_password TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE "user" (
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	id SERIAL NOT NULL,
+	email VARCHAR NOT NULL,
+	hashed_password VARCHAR NOT NULL,
+	PRIMARY KEY (id)
 );
 
--- Create session table
-CREATE TABLE IF NOT EXISTS session (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
+CREATE UNIQUE INDEX ix_user_email ON "user" (email);
+
+CREATE TABLE session (
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	id VARCHAR NOT NULL,
+	user_id INTEGER NOT NULL,
+	name VARCHAR NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(user_id) REFERENCES "user" (id)
 );
 
--- Create thread table
-CREATE TABLE IF NOT EXISTS thread (
-    id TEXT PRIMARY KEY,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create indexes for frequently queried columns
-CREATE INDEX IF NOT EXISTS idx_user_email ON user(email);
-CREATE INDEX IF NOT EXISTS idx_session_user_id ON session(user_id);
+CREATE INDEX ix_session_user_id ON session (user_id);

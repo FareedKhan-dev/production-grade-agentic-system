@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Script to view Docker container logs
+# Script to view the logs of the app and database containers
 
 if [ $# -ne 1 ]; then
   echo "Usage: $0 <environment>"
@@ -17,26 +17,16 @@ if [[ ! "$ENV" =~ ^(development|staging|production)$ ]]; then
   exit 1
 fi
 
-CONTAINER_NAME="fastapi-langgraph-$ENV"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env.$ENV"
 
-echo "Viewing logs for $ENV environment container"
-
-# Check if container exists
-if [ ! "$(docker ps -a -q -f name=$CONTAINER_NAME)" ]; then
-  echo "Container $CONTAINER_NAME does not exist. Please run it first with:"
-  echo "make docker-run-env ENV=$ENV"
-  exit 1
-fi
-
-# Get container status
-STATUS=$(docker inspect --format='{{.State.Status}}' $CONTAINER_NAME 2>/dev/null)
-
-if [ "$STATUS" != "running" ]; then
-  echo "Container $CONTAINER_NAME is not running (status: $STATUS)"
-  echo "To start it, run: docker start $CONTAINER_NAME"
-  exit 1
-fi
+cd "$PROJECT_ROOT"
 
 # Display logs with follow option
-echo "Following logs from $CONTAINER_NAME (Ctrl+C to exit)"
-docker logs -f $CONTAINER_NAME 
+echo "Following logs for the $ENV environment (Ctrl+C to exit)"
+if [ -f "$ENV_FILE" ]; then
+  APP_ENV=$ENV docker compose --env-file "$ENV_FILE" logs -f app db
+else
+  APP_ENV=$ENV docker compose logs -f app db
+fi

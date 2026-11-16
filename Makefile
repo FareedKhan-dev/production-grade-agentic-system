@@ -2,7 +2,8 @@ install:
 	pip install uv
 	uv sync
 
-DOCKER_COMPOSE ?= docker-compose
+# Compose v2 ("docker compose"); set DOCKER_COMPOSE=docker-compose for the retired v1 binary
+DOCKER_COMPOSE ?= docker compose
 
 set-env:
 	@if [ -z "$(ENV)" ]; then \
@@ -18,28 +19,32 @@ set-env:
 
 prod:
 	@echo "Starting server in production environment"
-	@bash -c "source scripts/set_env.sh production && ./.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop uvloop"
+	@bash -c "source scripts/set_env.sh production && ./.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --loop uvloop"
 
 staging:
 	@echo "Starting server in staging environment"
-	@bash -c "source scripts/set_env.sh staging && ./.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop uvloop"
+	@bash -c "source scripts/set_env.sh staging && ./.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --loop uvloop"
 
 dev:
 	@echo "Starting server in development environment"
-	@bash -c "source scripts/set_env.sh development && uv run uvicorn app.main:app --reload --port 8000 --loop uvloop"
+	@bash -c "source scripts/set_env.sh development && uv run uvicorn src.main:app --reload --port 8000 --loop uvloop"
 
 # Evaluation commands
 eval:
 	@echo "Running evaluation with interactive mode"
-	@bash -c "source scripts/set_env.sh ${ENV:-development} && python -m evals.main --interactive"
+	@bash -c "source scripts/set_env.sh $(or $(ENV),development) && uv run python -m evals.main --interactive"
 
 eval-quick:
 	@echo "Running evaluation with default settings"
-	@bash -c "source scripts/set_env.sh ${ENV:-development} && python -m evals.main --quick"
+	@bash -c "source scripts/set_env.sh $(or $(ENV),development) && uv run python -m evals.main --quick"
 
 eval-no-report:
 	@echo "Running evaluation without generating report"
-	@bash -c "source scripts/set_env.sh ${ENV:-development} && python -m evals.main --no-report"
+	@bash -c "source scripts/set_env.sh $(or $(ENV),development) && uv run python -m evals.main --no-report"
+
+# Tests need a PostgreSQL server; see tests/conftest.py for the variables they read
+test:
+	uv run --group test pytest
 
 lint:
 	ruff check .
@@ -170,14 +175,15 @@ help:
 	@echo "Targets:"
 	@echo "  install: Install dependencies"
 	@echo "  set-env ENV=<environment>: Set environment variables (development, staging, production, test)"
-	@echo "  run ENV=<environment>: Set environment and run server"
 	@echo "  prod: Run server in production environment"
 	@echo "  staging: Run server in staging environment"
 	@echo "  dev: Run server in development environment"
 	@echo "  eval: Run evaluation with interactive mode"
 	@echo "  eval-quick: Run evaluation with default settings"
 	@echo "  eval-no-report: Run evaluation without generating report"
-	@echo "  test: Run tests"
+	@echo "  test: Run tests (needs PostgreSQL)"
+	@echo "  lint: Check the code with ruff"
+	@echo "  format: Format the code with ruff"
 	@echo "  clean: Clean up"
 	@echo "  docker-build: Build default Docker image"
 	@echo "  docker-build-env ENV=<environment>: Build Docker image for specific environment"

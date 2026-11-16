@@ -29,6 +29,6 @@ class Session(BaseModel, table=True):
     """
 
     id: str = Field(primary_key=True)
-    user_id: int = Field(foreign_key="user.id")
+    user_id: int = Field(foreign_key="user.id", index=True)  # GET /sessions filters on it
     name: str = Field(default="")
     user: "User" = Relationship(back_populates="sessions")

@@ -83,6 +83,10 @@ class UserCreate(BaseModel):
         if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
             raise ValueError("Password must contain at least one special character")
 
+        # bcrypt reads only the first 72 bytes, and non-ASCII characters take several bytes each
+        if len(password.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 bytes long")
+
         return v
 
 
